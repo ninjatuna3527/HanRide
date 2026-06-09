@@ -1,0 +1,199 @@
+# Strava Chinese Title Updater
+
+Small Flask app + scheduler that renames new Strava activities with random Chinese characters.
+
+See .gitignore for exclusion of the .secure folder containing credentials.
+# Chinese Title Strava
+
+Small Python app that updates new Strava activities with titles containing random Chinese characters.
+
+Local setup (Windows)
+
+1. Create and activate a virtualenv (use Python 3.11+):
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+2. Install dependencies:
+
+```powershell
+pip install -r requirements.txt
+```
+
+3. Configure environment:
+
+```powershell
+copy .env.example .env
+# Edit .env and set STRAVA_CLIENT_ID and STRAVA_CLIENT_SECRET
+```
+ 
+ Optionally set a Flask session secret to enable OAuth state protection (recommended):
+ 
+ ```powershell
+ # generate a secret and add to your .env or credentials file
+ python - <<'PY'
+ import secrets
+ print(secrets.token_urlsafe(32))
+ PY
+ # then set FLASK_SECRET_KEY=the_value
+ ```
+
+4. Run the Flask server and complete OAuth:
+
+```powershell
+python -m src.app
+# Visit http://localhost:5000/authorize and complete authorization
+```
+
+5. After authorization, process new activities once:
+
+```powershell
+python -m src.app process
+```
+
+Docker setup
+
+Build the image and run with Docker:
+
+```powershell
+docker build -t chinese-title-strava .
+docker run --rm -p 5000:5000 -e STRAVA_CLIENT_ID=YOUR_ID -e STRAVA_CLIENT_SECRET=YOUR_SECRET -v ${PWD}/data:/data chinese-title-strava
+```
+
+Or use `docker-compose` (preferred for local dev). Create a `.env` with `STRAVA_CLIENT_ID` and `STRAVA_CLIENT_SECRET`, then:
+
+```powershell
+docker compose up --build
+```
+
+The app will be reachable at `http://localhost:5000`.
+
+Notes
+
+- Tokens and metadata are persisted to `/data/strava.db` inside the container. By default Compose mounts the host file `./.secure/strava.db` into the container at `/data/strava.db`.
+- Keep your `STRAVA_CLIENT_SECRET` private; do not commit `.env` to version control.
+
+Credentials file (secure mount)
+
+You can keep secrets and the database outside `.env` in a directory that is mounted into the container at runtime. Create a local directory called `.secure/` and add a `credentials.txt` file with shell-style `KEY=VALUE` lines, for example:
+
+```
+STRAVA_CLIENT_ID=your_client_id
+STRAVA_CLIENT_SECRET=your_client_secret
+# optional overrides
+DB_PATH=/data/strava.db
+BASE_URL=http://localhost:5000
+```
+
+Docker Compose is configured to mount the `./.secure` directory to `/app/.secure` inside the container and the container entrypoint will append its sanitized contents to `/app/.env` so the app can load them at startup. To avoid Compose warnings about missing variables, `docker-compose.yml` also uses `env_file: ./.secure/credentials.txt` so Compose will read and inject those variables when starting services.
+
+Create or initialize the DB file before first run (Docker will create an empty file if it does not exist on Linux, but you may want to initialize permissions):
+
+```powershell
+mkdir .secure
+# create an empty DB file or copy an existing one
+if (-not (Test-Path ./.secure/strava.db)) { New-Item -Path ./.secure/strava.db -ItemType File }
+```
+
+Using Docker secrets
+--------------------
+
+For production deployments you can use Docker secrets (Swarm or compatible
+runtimes) instead of mounting files. This repo declares a `strava_credentials`
+secret in `docker-compose.yml` that points to `./.secure/credentials.txt` for
+local testing. When provided, Docker places the secret at `/run/secrets/strava_credentials`
+inside the container and the entrypoint will source it the same way as the
+mounted file.
+
+You can also provide individual secret files named `/run/secrets/STRAVA_CLIENT_ID`
+and `/run/secrets/STRAVA_CLIENT_SECRET` and the entrypoint will export them
+to the environment.
+
+Example (Swarm secret create):
+
+```bash
+docker secret create strava_credentials ./.secure/credentials.txt
+docker stack deploy -c docker-compose.yml strava
+```
+
+Providing SSL cert/key via secrets
+---------------------------------
+
+
+You can provide an SSL certificate and private key via Docker secrets so the
+container serves HTTPS directly (useful for simple deployments). Create two
+secrets (or files) named `app_ssl_cert` and `app_ssl_key` containing the
+PEM certificate and private key respectively (the entrypoint also supports
+legacy names `strava_ssl_*` and generic `ssl_*` as fallbacks):
+
+```bash
+docker secret create app_ssl_cert ./.secure/ssl_cert.pem
+docker secret create app_ssl_key ./.secure/ssl_key.pem
+```
+
+The entrypoint writes these to `/app/ssl/cert.pem` and `/app/ssl/key.pem` and
+sets `SSL_CERTFILE`/`SSL_KEYFILE` environment variables. The development Flask
+server will use them when you run `python -m src.app`, and Gunicorn will pick
+them up via `gunicorn.conf.py` when running in the container.
+
+
+Configuring callback hostname
+------------------------------
+
+If your public host differs from the container `BASE_URL` (for example when
+running behind a load balancer or reverse proxy), set `CALLBACK_HOSTNAME` to
+your public host so the OAuth redirect URI is built correctly. Optionally set
+`CALLBACK_SCHEME` (`http` or `https`) — if unset the app will infer the
+scheme from `BASE_URL`.
+
+Example (in `.env`):
+
+```
+CALLBACK_HOSTNAME=app.example.com
+CALLBACK_SCHEME=https
+```
+
+
+
+Scheduler / periodic processing
+
+- Default cutoff date: activities before `2026-06-05` are not updated. Configure with `NOT_BEFORE_DATE=YYYY-MM-DD`.
+- The scheduler logs both updated and skipped activity counts. Example log line:
+
+```
+Processed activities, updated: 3, skipped: 5
+
+Production: Gunicorn & tuning
+--------------------------------
+
+This project uses `gunicorn` as the production WSGI server. The container
+entrypoint will auto-detect a sensible default worker count when
+`GUNICORN_WORKERS` is not provided: `GUNICORN_WORKERS = (2 * CPUs) + 1`.
+
+Recommended quick overrides (set in `.env`, Compose, or your orchestrator):
+
+```
+GUNICORN_WORKERS=3
+GUNICORN_TIMEOUT=60
+GUNICORN_LOGLEVEL=info
+```
+
+Guideline for workers: `(2 x CPU cores) + 1` is a good starting point for
+Gunicorn worker count; tune upwards if you expect many concurrent requests and
+have spare CPU.
+
+Restarting with Docker Compose:
+
+```powershell
+docker compose down
+docker compose up --build -d
+docker compose logs -f app
+```
+
+You can provide production overrides via `docker-compose.override.yml` which
+is included in this repository and contains example settings for `app` and
+`worker` services (restart policy, resource limits and env overrides).
+
+```

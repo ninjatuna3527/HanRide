@@ -1,0 +1,80 @@
+server {
+    listen 80;
+    server_name strava.leeson.zone;
+    # Serve the application under the configured base path and proxy
+    # to the local Gunicorn instance on port 5000. Requests to
+    # {{ base_path }}/... are forwarded with the prefix stripped.
+    location {{ base_path }}/ {
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Prefix {{ base_path }};
+
+        # Strip the base_path prefix before passing to upstream
+        proxy_pass http://127.0.0.1:5000/;
+        # Rewrite Location headers from upstream so redirects return to the base path
+        proxy_redirect / {{ base_path }}/;
+
+        # Websocket / keep-alive headers
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "";
+    }
+
+    # normalize missing-trailing-slash requests (e.g. /stravaapps -> /stravaapps/)
+    location = {{ base_path }} {
+        return 301 {{ base_path }}/;
+    }
+
+    # Allow Let's Encrypt to perform HTTP-01 validation via the webroot
+    location ^~ /.well-known/acme-challenge/ {
+        root {{ acme_webroot | default('/var/www/letsencrypt') }};
+        try_files $uri =404;
+    }
+
+    # Health endpoint exposed at the base path
+    location = {{ base_path }}/health {
+        proxy_pass http://127.0.0.1:5000/health;
+    }
+
+    # Redirect to HTTPS if TLS is enabled and certs are present
+    {% if enable_tls and nginx_server_name != 'localhost' %}
+    return 301 https://$host$request_uri;
+    {% endif %}
+}
+
+{% if enable_tls %}
+server {
+    listen 443 ssl;
+    server_name strava.leeson.zone;
+
+    ssl_certificate {{ ssl_cert_path }};
+    ssl_certificate_key {{ ssl_key_path }};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    # Serve the app under the same base_path on HTTPS as on HTTP
+    location {{ base_path }}/ {
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_set_header X-Forwarded-Prefix {{ base_path }};
+
+        proxy_pass http://127.0.0.1:5000/;
+        proxy_redirect / {{ base_path }}/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "";
+    }
+
+    location = {{ base_path }} {
+        return 301 {{ base_path }}/;
+    }
+
+    location = {{ base_path }}/health {
+        proxy_pass http://127.0.0.1:5000/health;
+    }
+}
+{% endif %}
